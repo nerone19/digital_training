@@ -1,4 +1,7 @@
 transcriptions/**
 yt_videos/**
-venv
+/venv*
 test
+temp
+res
+standalone_embed.sh
