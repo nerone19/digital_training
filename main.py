@@ -618,7 +618,9 @@ class RAGSystem:
         """Query the RAG system."""
         if not use_rag:
             # Direct LLM query
-            messages = [HumanMessage(question)]
+            messages = [HumanMessage(TextProcessor.format_reasoning_prompt(question))]
+            logger.info(messages)
+            print('mes', messages, flush=True)
             response = self.text_processor.llm.invoke(messages)
             return response.content
         
@@ -770,6 +772,8 @@ def create_argument_parser():
     query_parser = subparsers.add_parser('query', help='Query the RAG system')
     query_parser.add_argument('--question', help='Question to ask')
     query_parser.add_argument('--data-file', help='File containing processed data')
+    query_parser.add_argument('--save-data', default='processed_results.json',
+                                help='File to save processed data (default: processed_results.json)')
     
     # Global options
     parser.add_argument('--config', help='Configuration file (JSON)')
@@ -783,7 +787,7 @@ def create_argument_parser():
 
 import sys
 
-def main2():
+def main():
     """Main execution function with argument parsing."""
     parser = create_argument_parser()
     args = parser.parse_args()
@@ -841,7 +845,7 @@ def main2():
 
     elif args.mode == 'query':            
         # Load existing data
-        file_chunks = rag_system.load_existing_data(args.data_file)
+        file_chunks = rag_system.load_existing_data(args.save_data)
         if not file_chunks:
             logger.error("No data loaded. Check your data file.")
             sys.exit(1)
@@ -860,4 +864,4 @@ def main2():
 
 
 if __name__ == "__main__":
-    main2()
+    main()
