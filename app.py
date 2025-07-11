@@ -18,7 +18,7 @@ import logging
 from contextlib import asynccontextmanager
 
 # Import existing classes from main.py
-from main import Config, RAGSystem, logger
+from main import Config, RAGSystem, logger, MongoDB
 
 # Pydantic models for API
 class VideoProcessRequest(BaseModel):
@@ -229,6 +229,9 @@ async def get_data_info():
         raise HTTPException(status_code=500, detail="RAG system not initialized")
     
     try:
+
+        db = MongoDB()
+        return db.list_all(colletion='videos')
         file_chunks = rag_system.load_existing_data("processed_results.json")
         
         if not file_chunks:

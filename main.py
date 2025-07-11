@@ -37,7 +37,8 @@ from langchain.text_splitter import TokenTextSplitter, RecursiveCharacterTextSpl
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.embeddings import Embeddings
-
+import json
+from pymongo import MongoClient
 
 # Configuration
 class Config:
@@ -62,11 +63,46 @@ class Config:
     MILVUS_PORT = 19530
     DB_NAME = "milvus_demo"
     COLLECTION_NAME = "hybrid_demo"
-
+    MONGO_URI = 'mongodb://localhost:27017/'
+    MONGO_DB = 'db'
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+
+
+mongo_collections = { "youtube_videos": {"name": "videos", "description": "collection containing youtube videos"}}
+
+class MongoDB():
+
+    def __new__(cls):
+        if not hasattr(cls, 'instance'):
+            cls.instance = super(MongoDB, cls).__new__(cls)
+            cls._client = MongoClient(Config.MONGO_URI)
+            cls._db = cls.client[Config.MONGO_DB]
+        return cls.instance
+     
+    @property
+    def client(self):
+        return self._client
+    
+    @property
+    def db(self):
+        return self._db
+    
+    def list_all(self,colletion):
+        print(colletion)
+        return self.db[colletion].find({})
+    
+    def populate_db_from_json(self, json_file, collection_name):
+        col = self.db[collection_name]
+        with open(json_file, "r") as file:
+            json_data = json.load(file) 
+        
+        for k,v in json_data.items():
+            col.insert_one({k:v})
 
 
 class CustomWhisperParser(OpenAIWhisperParserLocal):
@@ -462,6 +498,8 @@ class RAGSystem:
     def load_existing_data(self, data_file: str) -> Dict[str, Dict]:
         """Load existing processed data from file."""
         try:
+            db = MongoDB()
+
             with open(data_file, 'r') as f:
                 return json.load(f)
         except FileNotFoundError:

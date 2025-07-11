@@ -6,3 +6,4 @@ temp
 res
 *pycache*
 standalone_embed.sh
+**/node_modules/** 
