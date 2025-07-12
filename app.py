@@ -15,6 +15,7 @@ from pydantic import BaseModel, HttpUrl
 from typing import List, Dict, Any, Optional
 import json
 import logging
+import uvicorn
 from contextlib import asynccontextmanager
 
 # Import existing classes from main.py
@@ -144,9 +145,7 @@ async def query_rag(request: QueryRequest):
         raise HTTPException(status_code=500, detail="RAG system not initialized")
     
     try:
-        # Load existing data (this should be optimized in production)
-        file_chunks = rag_system.load_existing_data("processed_results.json")
-        
+        file_chunks = MongoDB().load_existing_data("videos")
         if not file_chunks:
             raise HTTPException(
                 status_code=404, 
@@ -199,7 +198,7 @@ async def get_status():
     # Try to get data file info
     data_info = {}
     try:
-        file_chunks = rag_system.load_existing_data("processed_results.json")
+        file_chunks = MongoDB().load_existing_data("videos")
         data_info = {
             "processed_videos": len(file_chunks),
             "data_file_exists": True
@@ -231,26 +230,27 @@ async def get_data_info():
     try:
 
         db = MongoDB()
-        return db.list_all(colletion='videos')
-        file_chunks = rag_system.load_existing_data("processed_results.json")
-        
-        if not file_chunks:
+        videos = list(db.list_all(colletion='videos'))
+        if not videos:
             return {
                 "videos_count": 0,
                 "videos": []
             }
         
         videos_info = []
-        for video_id, data in file_chunks.items():
+        for video_chunk in videos:
+            keys = video_chunk.keys()
+            _, video_id = keys
+            video_info = video_chunk[video_id]
             videos_info.append({
                 "video_id": video_id,
-                "url": data.get("url", ""),
-                "chunks_count": len(data.get("chunks", [])),
-                "summaries_count": len(data.get("summaries", []))
+                "url": video_info.get("url", ""),
+                "chunks_count": len(video_info.get("chunks", [])),
+                "summaries_count": len(video_info.get("summaries", []))
             })
         
         return {
-            "videos_count": len(file_chunks),
+            "videos_count": len(videos),
             "videos": videos_info
         }
         
@@ -291,5 +291,4 @@ async def generate_step_back_query(request: QueryRequest):
         raise HTTPException(status_code=500, detail=f"Step-back query generation failed: {str(e)}")
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)

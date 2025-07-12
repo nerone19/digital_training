@@ -80,8 +80,8 @@ class MongoDB():
     def __new__(cls):
         if not hasattr(cls, 'instance'):
             cls.instance = super(MongoDB, cls).__new__(cls)
-            cls._client = MongoClient(Config.MONGO_URI)
-            cls._db = cls.client[Config.MONGO_DB]
+            cls.instance._client = MongoClient(Config.MONGO_URI)
+            cls.instance._db = cls.instance._client[Config.MONGO_DB]  # Changed this line
         return cls.instance
      
     @property
@@ -93,9 +93,25 @@ class MongoDB():
         return self._db
     
     def list_all(self,colletion):
-        print(colletion)
-        return self.db[colletion].find({})
+        cursor = self._db[colletion].find({})
+        docs = []
+        for doc in cursor:
+            # Convert ObjectId to string to avoid serialization issues
+            doc['_id'] = str(doc['_id'])
+            docs.append(doc)
+        return list(docs)
     
+    def load_existing_data(self, collection):
+        videos = self.list_all(collection)
+        videos_data = []
+        for video_chunk in videos:
+            keys = video_chunk.keys()
+            _, video_id = keys
+            video_info = video_chunk[video_id]
+            videos_data.append(video_info)
+        return videos_data
+    
+
     def populate_db_from_json(self, json_file, collection_name):
         col = self.db[collection_name]
         with open(json_file, "r") as file:
