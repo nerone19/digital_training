@@ -72,9 +72,10 @@ logger = logging.getLogger(__name__)
 
 
 
-
+# todo: this is not meaningful yet. redo
 mongo_collections = { "youtube_videos": {"name": "videos", "description": "collection containing youtube videos"}}
 
+# improve this class
 class MongoDB():
 
     def __new__(cls):
@@ -101,14 +102,15 @@ class MongoDB():
             docs.append(doc)
         return list(docs)
     
-    def load_existing_data(self, collection):
+    # todo: improve this method
+    def load_existing_data(self, collection) -> Dict[str, Dict]:
         videos = self.list_all(collection)
-        videos_data = []
+        videos_data = {}
         for video_chunk in videos:
             keys = video_chunk.keys()
             _, video_id = keys
             video_info = video_chunk[video_id]
-            videos_data.append(video_info)
+            videos_data = {video_id: video_info}
         return videos_data
     
 
@@ -119,6 +121,11 @@ class MongoDB():
         
         for k,v in json_data.items():
             col.insert_one({k:v})
+
+    def save_processed_doc(self, collection, doc):
+
+        return self.db[collection].insert_one({doc})
+
 
 
 class CustomWhisperParser(OpenAIWhisperParserLocal):
@@ -601,11 +608,12 @@ class RAGSystem:
         logger.info(f"Processing {len(urls)} videos in batches of {batch_size}...")
         
         # Load existing data if save_file exists
-        existing_data = {}
-        if save_file and os.path.exists(save_file):
-            existing_data = self.load_existing_data(save_file)
-            logger.info(f"Loaded {len(existing_data)} existing entries from {save_file}")
-        
+        # existing_data = {}
+        # if save_file and os.path.exists(save_file):
+        #     existing_data = self.load_existing_data(save_file)
+        #     logger.info(f"Loaded {len(existing_data)} existing entries from {save_file}")
+        existing_data = MongoDB().load_existing_data("videos")
+        print(existing_data)
         # Check which URLs are already processed
         new_urls, skipped_urls = self.check_already_processed(urls, existing_data)
         
@@ -645,8 +653,9 @@ class RAGSystem:
                 self.text_processor.generate_summaries(file_chunks)
                 
                 # Save batch results immediately if save_file is provided
-                if save_file:
-                    self.save_batch_data(file_chunks, save_file)
+                # if save_file:
+                #     self.save_batch_data(file_chunks, save_file)
+                MongoDB().save_processed_doc("videos", file_chunks)
                 
                 # Merge with existing chunks
                 all_file_chunks.update(file_chunks)
