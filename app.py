@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 
 # Import existing classes from main.py
 from main import Config, RAGSystem, logger, MongoDB
+from db import VideoRepository
 
 # Pydantic models for API
 class VideoProcessRequest(BaseModel):
@@ -29,6 +30,11 @@ class VideoProcessRequest(BaseModel):
 class QueryRequest(BaseModel):
     question: str
     use_rag: Optional[bool] = True
+
+class FollowUpQueryRequest(BaseModel):
+    question: str
+    use_rag: Optional[bool] = True
+    chat_history: List[str]
 
 class QueryResponse(BaseModel):
     question: str
@@ -108,6 +114,7 @@ async def process_videos(
         if not url.startswith(("https://www.youtube.com/", "https://youtube.com/", "https://youtu.be/")):
             raise HTTPException(status_code=400, detail=f"Invalid YouTube URL: {url}")
     
+
     # Add background task
     background_tasks.add_task(
         process_videos_background,
@@ -145,8 +152,9 @@ async def query_rag(request: QueryRequest):
         raise HTTPException(status_code=500, detail="RAG system not initialized")
     
     try:
-        file_chunks = MongoDB().load_existing_data("videos")
-        if not file_chunks:
+        db = MongoDB()
+        videos = VideoRepository(db).list_all_videos()
+        if not videos:
             raise HTTPException(
                 status_code=404, 
                 detail="No processed data found. Please process some videos first."
@@ -154,30 +162,12 @@ async def query_rag(request: QueryRequest):
         
         # Setup vector store if not already done
         try:
-            rag_system.setup_vector_store(file_chunks)
+            rag_system.setup_vector_store(videos)
         except Exception as e:
             logger.warning(f"Vector store setup warning: {e}")
         
         # Perform query
-        answer = rag_system.query(request.question, request.use_rag)
-        
-        # Get search results if using RAG
-        search_results = None
-        if request.use_rag:
-            try:
-                search_results = rag_system.vector_store.sparse_search(request.question, limit=5)
-                # Convert search results to serializable format
-                search_results = [
-                    {
-                        "text": hit.entity.get("text", ""),
-                        "score": hit.score,
-                        "chunk_id": hit.entity.get("chunk_id", 0),
-                        "url": hit.entity.get("url", "")
-                    }
-                    for hit in search_results
-                ]
-            except Exception as e:
-                logger.warning(f"Could not retrieve search results: {e}")
+        answer,search_results = rag_system.query(request.question, request.use_rag)
         
         return QueryResponse(
             question=request.question,
@@ -189,6 +179,10 @@ async def query_rag(request: QueryRequest):
         logger.error(f"Error in query processing: {e}")
         raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
 
+@app.post("/follow-up-query")
+async def follow_up_query(FollowUpQueryRequest):
+    pass
+
 @app.get("/status")
 async def get_status():
     """Get system status and configuration."""
@@ -198,9 +192,9 @@ async def get_status():
     # Try to get data file info
     data_info = {}
     try:
-        file_chunks = MongoDB().load_existing_data("videos")
+        file_chunks = VideoRepository.load_existing_video_data()
         data_info = {
-            "processed_videos": len(file_chunks),
+            "processed_videos": len(file_chunks.keys()),
             "data_file_exists": True
         }
     except:
@@ -230,7 +224,7 @@ async def get_data_info():
     try:
 
         db = MongoDB()
-        videos = list(db.list_all(colletion='videos'))
+        videos = VideoRepository(db).list_all_videos()
         if not videos:
             return {
                 "videos_count": 0,
@@ -238,10 +232,10 @@ async def get_data_info():
             }
         
         videos_info = []
-        for video_chunk in videos:
-            keys = video_chunk.keys()
+        for idx, video in enumerate(videos):
+            keys = video.keys()
             _, video_id = keys
-            video_info = video_chunk[video_id]
+            video_info = video[video_id]
             videos_info.append({
                 "video_id": video_id,
                 "url": video_info.get("url", ""),
@@ -250,7 +244,7 @@ async def get_data_info():
             })
         
         return {
-            "videos_count": len(videos),
+            "videos_count": idx+1,
             "videos": videos_info
         }
         

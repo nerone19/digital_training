@@ -38,93 +38,14 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.embeddings import Embeddings
 import json
-from pymongo import MongoClient
 
-# Configuration
-class Config:
-    """Configuration settings for the YouTube RAG system."""
-    
-    MODEL = "qwen/qwen3-30b-a3b"
-    TAILSCALE_SERVER = "https://desktop-3oeimac.tail3b962f.ts.net"
-    CHAT_API = TAILSCALE_SERVER + "/api/v0/chat/completions"
-    EMBEDDING_MODEL = "text-embedding-qwen3-embedding-8b@q5_0"
-    DENSE_EMBEDDING_MODEL = "text-embedding-nomic-embed-text-v1.5"
-    
-    MEDIA_DIR = "./media/it"
-    TEMP_DIR = "./temp"
-    RES_DIR = './res'
-    CHUNK_SIZE = 3200
-    CHUNK_OVERLAP = 40
-    BATCH_SIZE = 8
-    CHUNK_LENGTH = 30
-    
-    # Milvus settings
-    MILVUS_HOST = "127.0.0.1"
-    MILVUS_PORT = 19530
-    DB_NAME = "milvus_demo"
-    COLLECTION_NAME = "hybrid_demo"
-    MONGO_URI = 'mongodb://localhost:27017/'
-    MONGO_DB = 'db'
+from db import MongoDB, ChatSessionRepository, VideoRepository
+from classes import ChatSessionManager
+from config import Config
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-
-# todo: this is not meaningful yet. redo
-mongo_collections = { "youtube_videos": {"name": "videos", "description": "collection containing youtube videos"}}
-
-# improve this class
-class MongoDB():
-
-    def __new__(cls):
-        if not hasattr(cls, 'instance'):
-            cls.instance = super(MongoDB, cls).__new__(cls)
-            cls.instance._client = MongoClient(Config.MONGO_URI)
-            cls.instance._db = cls.instance._client[Config.MONGO_DB]  # Changed this line
-        return cls.instance
-     
-    @property
-    def client(self):
-        return self._client
-    
-    @property
-    def db(self):
-        return self._db
-    
-    def list_all(self,colletion):
-        cursor = self._db[colletion].find({})
-        docs = []
-        for doc in cursor:
-            # Convert ObjectId to string to avoid serialization issues
-            doc['_id'] = str(doc['_id'])
-            docs.append(doc)
-        return list(docs)
-    
-    # todo: improve this method
-    def load_existing_data(self, collection) -> Dict[str, Dict]:
-        videos = self.list_all(collection)
-        videos_data = {}
-        for video_chunk in videos:
-            keys = video_chunk.keys()
-            _, video_id = keys
-            video_info = video_chunk[video_id]
-            videos_data = {video_id: video_info}
-        return videos_data
-    
-
-    def populate_db_from_json(self, json_file, collection_name):
-        col = self.db[collection_name]
-        with open(json_file, "r") as file:
-            json_data = json.load(file) 
-        
-        for k,v in json_data.items():
-            col.insert_one({k:v})
-
-    def save_processed_doc(self, collection, doc):
-
-        return self.db[collection].insert_one({doc})
 
 
 
@@ -420,21 +341,27 @@ class VectorStore:
         
         self.collection.load()
     
-    def insert_documents(self, file_chunks: Dict[str, Dict]):
+    def insert_documents(self, documents):
         """Insert documents into vector store."""
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=512, chunk_overlap=20
         )
         
-        for file_id, data in file_chunks.items():
+        # Iterate through the MongoDB cursor
+        for document in documents:
+            video_key = [k for k in document.keys() if k!='_id']
+            video_id = video_key[0]
+            if len(video_key) > 1:
+                raise('document structure is changed. we only expect one key.')
+            data = document[video_id]  # The document itself contains the data
+            
             for idx, (chunk, summary) in enumerate(zip(data['chunks'], data['summaries'])):
                 # Insert summary
                 sparse_emb = self.bge_model([summary])
                 dense_emb = self.embedding_model.embed_query(summary)
-                
                 self.collection.insert({
                     "text": summary,
-                    "hashed_title": file_id,
+                    "hashed_title": video_id,
                     "summary": True,
                     "chunk_id": idx,
                     "sparse_vector": sparse_emb.get('sparse'),
@@ -447,17 +374,16 @@ class VectorStore:
                 for doc in documents:
                     dense_chunk_emb = self.embedding_model.embed_query(doc)
                     sparse_chunk_emb = self.bge_model([doc])
-                    
                     self.collection.insert({
                         "text": doc,
-                        "hashed_title": file_id,
+                        "hashed_title": video_id,
                         "summary": False,
                         "chunk_id": idx,
                         "sparse_vector": sparse_chunk_emb.get('sparse'),
                         "dense_vector": dense_chunk_emb,
                         "url": data.get('url')
                     })
-    
+        
     def hybrid_search(self, query: str, limit: int = 5) -> List[Any]:
         """Perform hybrid search using both sparse and dense vectors."""
         query_sparse = self.bge_model([query])['sparse']
@@ -489,16 +415,25 @@ class VectorStore:
         
         return results
     
-    def sparse_search(self, query: str, limit: int = 10) -> List[Any]:
+    def sparse_search(self, query: str, limit: int = 10, expr: Optional[str] = None) -> List[Any]:
         """Perform sparse search on summaries only."""
         query_sparse = self.bge_model([query])['sparse']
         
-        results = self.collection.search(
+        if expr:
+            results = self.collection.search(
+                [query_sparse],
+                anns_field="sparse_vector",
+                limit=limit,
+                expr=expr,
+                output_fields=["text", "summary", "chunk_id", "url"],
+                param={"metric_type": "IP", "params": {}}
+            )[0]
+        else: 
+            results = self.collection.search(
             [query_sparse],
             anns_field="sparse_vector",
             limit=limit,
-            expr='summary==True',
-            output_fields=["text", "summary", "chunk_id"],
+            output_fields=["text", "summary", "chunk_id", "url"],
             param={"metric_type": "IP", "params": {}}
         )[0]
         
@@ -507,31 +442,28 @@ class VectorStore:
 
 class RAGSystem:
     """Main RAG system orchestrator."""
-    
-    def __init__(self, config: Config):
+    def __init__(self, config):
         self.config = config
+
+        # Initialize your existing components
         self.youtube_processor = YouTubeProcessor(config)
         self.text_processor = TextProcessor(config)
         self.vector_store = VectorStore(config)
+        
+        # Initialize database layer
+        MongoDB.configure(self.config.MONGO_URI, self.config.MONGO_DB)
+        self.db = MongoDB()
+        # Initialize repositories (data access layer)
+        self.chat_repository = ChatSessionRepository(self.db)
+        self.video_repository = VideoRepository(self.db)
+        
+        # Initialize chat manager (business logic layer)
+        self.chat_manager = ChatSessionManager(self.chat_repository)
         
         # Ensure directories exist
         os.makedirs(config.MEDIA_DIR, exist_ok=True)
         os.makedirs(config.TEMP_DIR, exist_ok=True)
 
-    def load_existing_data(self, data_file: str) -> Dict[str, Dict]:
-        """Load existing processed data from file."""
-        try:
-            db = MongoDB()
-
-            with open(data_file, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            logger.error(f"Data file {data_file} not found")
-            return {}
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON in data file {data_file}")
-            return {}
-    
     def save_batch_data(self, file_chunks: Dict[str, Dict], save_file: str):
         """Save or append batch data to JSON file."""
         existing_data = {}
@@ -555,7 +487,7 @@ class RAGSystem:
         
         logger.info(f"Saved {len(file_chunks)} new entries to {save_file} (total: {len(existing_data)})")
     
-    def check_already_processed(self, urls: List[str], existing_data: Dict[str, Dict]) -> Tuple[List[str], List[str]]:
+    def check_already_processed(self, urls: List[str], existing_data: List[Dict[str, Dict]]) -> Tuple[List[str], List[str]]:
         """
         Check which URLs have already been processed by comparing hash IDs from filenames and URLs.
         
@@ -569,11 +501,19 @@ class RAGSystem:
         new_urls = []
         skipped_urls = []
         
+
         # Create a set of existing URLs for faster lookup
         existing_urls = set()
-        for data in existing_data.values():
-            if 'url' in data:
-                existing_urls.add(data['url'])
+        for data in existing_data:
+            video_key = [k for k in data.keys() if k!='_id']
+            video_id = video_key[0]
+            if len(video_key) > 1:
+                raise('document structure is changed. we only expect one key.')
+            data = data[video_id]  # The document itself contains the data
+
+            for el in data.values():
+                if 'url' in el:
+                    existing_urls.add(el['url'])
         
         for url in urls:
             try:
@@ -607,26 +547,19 @@ class RAGSystem:
         """Process videos end-to-end with batching support and incremental saving."""
         logger.info(f"Processing {len(urls)} videos in batches of {batch_size}...")
         
-        # Load existing data if save_file exists
-        # existing_data = {}
-        # if save_file and os.path.exists(save_file):
-        #     existing_data = self.load_existing_data(save_file)
-        #     logger.info(f"Loaded {len(existing_data)} existing entries from {save_file}")
-        existing_data = MongoDB().load_existing_data("videos")
-        print(existing_data)
+        existing_videos = self.video_repository.list_all_videos()
         # Check which URLs are already processed
-        new_urls, skipped_urls = self.check_already_processed(urls, existing_data)
+        new_urls, skipped_urls = self.check_already_processed(urls, existing_videos)
         
         if skipped_urls:
             logger.info(f"Skipped {len(skipped_urls)} already processed videos")
         
         if not new_urls:
             logger.info("All videos already processed!")
-            return existing_data
+            return existing_videos
         
         logger.info(f"Processing {len(new_urls)} new videos")
         logger.info(new_urls)
-        all_file_chunks = existing_data.copy()  # Start with existing data
         
         # Process only new videos in batches
         for i in range(0, len(new_urls), batch_size):
@@ -651,14 +584,8 @@ class RAGSystem:
                 
                 # Generate summaries
                 self.text_processor.generate_summaries(file_chunks)
-                
-                # Save batch results immediately if save_file is provided
-                # if save_file:
-                #     self.save_batch_data(file_chunks, save_file)
-                MongoDB().save_processed_doc("videos", file_chunks)
-                
-                # Merge with existing chunks
-                all_file_chunks.update(file_chunks)
+
+                self.video_repository.save_video_data(file_chunks)
                 
                 logger.info(f"Completed batch {i//batch_size + 1}")
                 
@@ -667,30 +594,33 @@ class RAGSystem:
                 # Continue with next batch even if this one fails
                 continue
         
-        return all_file_chunks
-    def setup_vector_store(self, file_chunks: Dict[str, Dict]):
+
+        return self.video_repository.list_all_videos()
+
+    def setup_vector_store(self, documents: Dict[str, Dict]):
         """Setup vector store with processed documents."""
         logger.info("Setting up vector store...")
         
         self.vector_store.create_collection()
-        self.vector_store.insert_documents(file_chunks)
+        self.vector_store.insert_documents(documents)
         
         logger.info("Vector store setup complete")
     
-    def query(self, question: str, use_rag: bool = True) -> str:
-        """Query the RAG system."""
+    def query(self, question: str, use_rag: bool = True, use_summary: bool = True) -> str:
+        """Query the RAG system - your original method unchanged."""
         if not use_rag:
-            # Direct LLM query
             messages = [HumanMessage(TextProcessor.format_reasoning_prompt(question))]
-            logger.info(messages)
-            print('mes', messages, flush=True)
             response = self.text_processor.llm.invoke(messages)
-            return response.content
+            return response.content, None
         
         # RAG query
-        search_results = self.vector_store.sparse_search(question)
+        if use_summary:
+            custom_expr='summary==True'
+        else: 
+            custom_expr='summary==False'
+        search_results = self.vector_store.sparse_search(question, expr = custom_expr)
         context = "\n".join([str(hit) for hit in search_results])
-        
+        print(context)
         system_prompt = """You are an AI assistant. You are able to find answers to questions from the contextual passage snippets provided."""
         
         user_prompt = f"""
@@ -709,7 +639,24 @@ class RAGSystem:
         ]
         
         response = self.text_processor.llm.invoke(messages)
-        return self.text_processor.remove_think_tags(response.content)
+
+        try:
+            # Convert search results to serializable format
+            search_results = [
+                {
+                    "text": hit.entity.get("text", ""),
+                    "score": hit.score,
+                    "chunk_id": hit.entity.get("chunk_id", 0),
+                    "url": hit.entity.get("url", "")
+                }
+                for hit in search_results
+            ]
+        except Exception as e:
+            logger.warning(f"Could not retrieve search results: {e}")
+            search_results = None
+
+
+        return self.text_processor.remove_think_tags(response.content), search_results
     
     def generate_sub_queries(self, query: str) -> str:
         """Generate sub-queries for better retrieval."""
