@@ -681,7 +681,7 @@ class RAGSystem:
             enhanced_query = user_input
         
         # Get response from RAG system
-        response_content = self.query(enhanced_query, use_rag=use_rag)
+        response_content, search_results = self.query(enhanced_query, use_rag=use_rag)
         
         # Prepare metadata
         metadata = {
@@ -689,7 +689,7 @@ class RAGSystem:
             "include_context": include_context,
             "context_length": len(conversation_context) if include_context else 0,
             "session_id": self.chat_manager.current_session_id,
-            "enhanced_query_used": enhanced_query != user_input
+            "search_results": search_results
         }
         
         # Add assistant message to session

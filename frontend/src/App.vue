@@ -101,6 +101,9 @@
         <div v-if="apiStatus.processedVideos" class="status-item">
           📹 {{ apiStatus.processedVideos }} videos processed
         </div>
+        <div v-if="sessionId" class="status-item">
+          💬 Session: {{ sessionId.substring(0, 8) }}...
+        </div>
       </div>
     </div>
   </div>
@@ -117,6 +120,7 @@ export default {
       currentMessage: '',
       isLoading: false,
       useRAG: true,
+      sessionId: null, // Track the current session ID
       apiStatus: {
         connected: false,
         processedVideos: 0
@@ -157,10 +161,23 @@ export default {
       this.scrollToBottom()
       
       try {
-        const response = await axios.post('/api/query', {
-          question: question,
-          use_rag: this.useRAG
-        })
+        let response;
+        
+        // Use follow-up-query endpoint if we have a session, otherwise use query
+        if (this.sessionId) {
+          response = await axios.post('/api/follow-up-query', {
+            question: question,
+            use_rag: this.useRAG,
+            session_id: this.sessionId
+          })
+        } else {
+          response = await axios.post('/api/query', {
+            question: question,
+            use_rag: this.useRAG
+          })
+          // Store session ID from first query
+          this.sessionId = response.data.session_id
+        }
         
         const aiMessage = {
           type: 'ai',

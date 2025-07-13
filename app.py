@@ -80,7 +80,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
+@app.get("/api")
 async def root():
     """Root endpoint with API information."""
     return {
@@ -182,7 +182,7 @@ async def query_rag(request: QueryRequest):
         logger.error(f"Error in query processing: {e}")
         raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
 
-@app.post("/follow-up-query")
+@app.post("/follow-up-query", response_model=QueryResponse)
 async def follow_up_query(request: FollowUpQueryRequest):
 
     try:
@@ -201,12 +201,21 @@ async def follow_up_query(request: FollowUpQueryRequest):
                 logger.warning(f"Vector store setup warning: {e}")
 
         rag_system.chat_manager.load_session(request.session_id)
-        response, metadata = rag_system.chat_with_context(
+        answer, metadata = rag_system.chat_with_context(
             request.question,
-            use_rag=True,
+            use_rag=request.use_rag,
             include_context=True
         )
-        return response
+        
+        # Extract search results from metadata if available
+        search_results = metadata.get('search_results', None)
+        
+        return QueryResponse(
+            question=request.question,
+            answer=answer,
+            search_results=search_results,
+            session_id=metadata.get('session_id', request.session_id)
+        )
 
     except Exception as e:
         logger.error(f"Error in query processing: {e}")
