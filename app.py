@@ -34,12 +34,13 @@ class QueryRequest(BaseModel):
 class FollowUpQueryRequest(BaseModel):
     question: str
     use_rag: Optional[bool] = True
-    chat_history: List[str]
+    session_id: str
 
 class QueryResponse(BaseModel):
     question: str
     answer: str
     search_results: Optional[List[Dict]] = None
+    session_id: str
 
 class ProcessStatusResponse(BaseModel):
     status: str
@@ -167,12 +168,14 @@ async def query_rag(request: QueryRequest):
             logger.warning(f"Vector store setup warning: {e}")
         
         # Perform query
-        answer,search_results = rag_system.query(request.question, request.use_rag)
-        
+        answer,search_results = rag_system.query(request.question, request.use_rag)    
+        session_id = rag_system.create_new_session(request.question, answer, {"rag": request.use_rag, "search_results": search_results})
+
         return QueryResponse(
             question=request.question,
             answer=answer,
-            search_results=search_results
+            search_results=search_results,
+            session_id=session_id
         )
         
     except Exception as e:
@@ -180,9 +183,36 @@ async def query_rag(request: QueryRequest):
         raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
 
 @app.post("/follow-up-query")
-async def follow_up_query(FollowUpQueryRequest):
-    pass
+async def follow_up_query(request: FollowUpQueryRequest):
 
+    try:
+        db = MongoDB()
+        videos = VideoRepository(db).list_all_videos()
+        if not videos:
+            raise HTTPException(
+                status_code=404, 
+                detail="No processed data found. Please process some videos first."
+            )
+        
+        # Setup vector store if not already done
+        try:
+            rag_system.setup_vector_store(videos)
+        except Exception as e:
+                logger.warning(f"Vector store setup warning: {e}")
+
+        rag_system.chat_manager.load_session(request.session_id)
+        response, metadata = rag_system.chat_with_context(
+            request.question,
+            use_rag=True,
+            include_context=True
+        )
+        return response
+
+    except Exception as e:
+        logger.error(f"Error in query processing: {e}")
+        raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
+
+#todo: update with last changes
 @app.get("/status")
 async def get_status():
     """Get system status and configuration."""

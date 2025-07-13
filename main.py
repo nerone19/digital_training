@@ -40,7 +40,7 @@ from langchain_core.embeddings import Embeddings
 import json
 
 from db import MongoDB, ChatSessionRepository, VideoRepository
-from classes import ChatSessionManager
+from classes import ChatSessionManager, ConversationContextBuilder
 from config import Config
 
 # Logging setup
@@ -605,7 +605,7 @@ class RAGSystem:
         self.vector_store.insert_documents(documents)
         
         logger.info("Vector store setup complete")
-    
+
     def query(self, question: str, use_rag: bool = True, use_summary: bool = True) -> str:
         """Query the RAG system - your original method unchanged."""
         if not use_rag:
@@ -613,14 +613,13 @@ class RAGSystem:
             response = self.text_processor.llm.invoke(messages)
             return response.content, None
         
-        # RAG query
         if use_summary:
             custom_expr='summary==True'
         else: 
             custom_expr='summary==False'
+
         search_results = self.vector_store.sparse_search(question, expr = custom_expr)
         context = "\n".join([str(hit) for hit in search_results])
-        print(context)
         system_prompt = """You are an AI assistant. You are able to find answers to questions from the contextual passage snippets provided."""
         
         user_prompt = f"""
@@ -657,6 +656,58 @@ class RAGSystem:
 
 
         return self.text_processor.remove_think_tags(response.content), search_results
+    
+    def chat_with_context(self, user_input: str, use_rag: bool = True, 
+                         include_context: bool = True, 
+                         max_context_messages: int = 10) -> Tuple[str, Dict[str, Any]]:
+        """Send a message with conversation context and get response."""
+        
+        # Ensure we have an active session
+        if not self.chat_manager.current_session_id:
+            self.chat_manager.start_new_session()
+        
+        # Add user message to session
+        self.chat_manager.add_user_message(user_input)
+        
+        # Build query with context if requested
+        if include_context:
+            conversation_context = self.chat_manager.get_conversation_context(
+                max_context_messages, exclude_last=True  # Exclude the message we just added
+            )
+            enhanced_query = ConversationContextBuilder.build_rag_context(
+                conversation_context, user_input
+            )
+        else:
+            enhanced_query = user_input
+        
+        # Get response from RAG system
+        response_content = self.query(enhanced_query, use_rag=use_rag)
+        
+        # Prepare metadata
+        metadata = {
+            "use_rag": use_rag,
+            "include_context": include_context,
+            "context_length": len(conversation_context) if include_context else 0,
+            "session_id": self.chat_manager.current_session_id,
+            "enhanced_query_used": enhanced_query != user_input
+        }
+        
+        # Add assistant message to session
+        self.chat_manager.add_assistant_message(response_content, metadata)
+        
+        return response_content, metadata
+    
+    
+    def create_new_session(self, question, answer, metadata):
+
+        if not self.chat_manager.current_session_id:
+            self.chat_manager.start_new_session()
+
+        self.chat_manager.add_user_message(question)
+        # Add assistant message to session
+        self.chat_manager.add_assistant_message(answer, metadata)
+        return self.chat_manager.current_session_id
+
     
     def generate_sub_queries(self, query: str) -> str:
         """Generate sub-queries for better retrieval."""
@@ -827,50 +878,51 @@ def main():
     # Initialize RAG system
     rag_system = RAGSystem(config)
 
-    if args.mode == 'download':
-        # Download and process mode
-        urls = []
+    # todo: update this with latest changes.
+    # if args.mode == 'download':
+    #     # Download and process mode
+    #     urls = []
         
-        if args.url_file:
-            urls.extend(load_urls_from_file(args.url_file))
+    #     if args.url_file:
+    #         urls.extend(load_urls_from_file(args.url_file))
         
-        if not urls:
-            logger.error("No URLs provided. Use --url-file")
-            sys.exit(1)
+    #     if not urls:
+    #         logger.error("No URLs provided. Use --url-file")
+    #         sys.exit(1)
         
-        logger.info(f"Processing {len(urls)} URLs")
+    #     logger.info(f"Processing {len(urls)} URLs")
         
-        # Process videos
-        file_chunks = rag_system.process_videos(urls, args.batch_size, args.save_data)
+    #     # Process videos
+    #     file_chunks = rag_system.process_videos(urls, args.batch_size, args.save_data)
         
-        # Save results
-        with open(args.save_data, 'w') as f:
-            json.dump(file_chunks, f, indent=2)
-        logger.info(f"Processed data saved to {args.save_data}")
+    #     # Save results
+    #     with open(args.save_data, 'w') as f:
+    #         json.dump(file_chunks, f, indent=2)
+    #     logger.info(f"Processed data saved to {args.save_data}")
         
-        # Setup vector store unless skipped
-        if not args.skip_vector_store:
-            rag_system.setup_vector_store(file_chunks)
-            logger.info("Vector store setup complete")
+    #     # Setup vector store unless skipped
+    #     if not args.skip_vector_store:
+    #         rag_system.setup_vector_store(file_chunks)
+    #         logger.info("Vector store setup complete")
 
-    elif args.mode == 'query':            
-        # Load existing data
-        file_chunks = rag_system.load_existing_data(args.save_data)
-        if not file_chunks:
-            logger.error("No data loaded. Check your data file.")
-            sys.exit(1)
+    # elif args.mode == 'query':            
+    #     # Load existing data
+    #     file_chunks = rag_system.load_existing_data(args.save_data)
+    #     if not file_chunks:
+    #         logger.error("No data loaded. Check your data file.")
+    #         sys.exit(1)
         
-        # Setup vector store
-        rag_system.setup_vector_store(file_chunks)
+    #     # Setup vector store
+    #     rag_system.setup_vector_store(file_chunks)
         
-        # Query the system
-        if args.question:
-            answer = rag_system.query(args.question)
-            print(f"Question: {args.question}")
-            print(f"Answer: {answer}")
-        else:
-            logger.error("No question provided. Use --question")
-            sys.exit(1)
+    #     # Query the system
+    #     if args.question:
+    #         answer = rag_system.query(args.question)
+    #         print(f"Question: {args.question}")
+    #         print(f"Answer: {answer}")
+    #     else:
+    #         logger.error("No question provided. Use --question")
+    #         sys.exit(1)
 
 
 if __name__ == "__main__":

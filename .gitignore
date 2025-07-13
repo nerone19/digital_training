@@ -1,8 +1,8 @@
 transcriptions/**
 yt_videos/**
 /venv*
-test
-temp
+test/ 
+temp/ 
 res
 *pycache*
 standalone_embed.sh
