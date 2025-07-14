@@ -51,6 +51,28 @@ This application allows users to:
 
 ## 🚀 **Getting Started**
 
+### Quick Start (FastAPI Only)
+
+If you just want to run the FastAPI backend:
+
+```bash
+# 1. Setup Python environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# 2. Install dependencies
+pip install -r requirements.txt
+pip install -r requirements_api.txt
+
+# 3. Start external services (Milvus, MongoDB, LM Studio)
+# See detailed setup below
+
+# 4. Start FastAPI server
+python app.py
+# Server will be available at http://localhost:8000
+# API docs at http://localhost:8000/docs
+```
+
 ### Prerequisites
 
 1. **Python 3.8+**
@@ -137,17 +159,42 @@ python main.py download --url-file media/it/videos.txt --batch-size 2 --save-dat
 python main.py download --urls "https://youtube.com/watch?v=..." --batch-size 1
 ```
 
-### Step 5: Start Backend API
+### Step 5: Start FastAPI Backend Server
 
+The backend uses FastAPI to provide a REST API for the YouTube RAG system. Here are the different ways to start it:
+
+**Option 1: Direct execution (Recommended)**
 ```bash
-# Start FastAPI server
-python app.py
+# Activate virtual environment
+source venv/bin/activate
 
-# Or using uvicorn directly
+# Start the FastAPI server directly
+python app.py
+```
+
+**Option 2: Using uvicorn command**
+```bash
+# Start with uvicorn (development mode with auto-reload)
 uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+
+# Or for production (without auto-reload)
+uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+**Option 3: Using uvicorn with custom settings**
+```bash
+# Start with custom log level and workers
+uvicorn app:app --host 0.0.0.0 --port 8000 --log-level info --workers 1
 ```
 
 The API will be available at `http://localhost:8000`
+
+#### FastAPI Features
+- **Auto-reload**: The development server automatically reloads when code changes
+- **Interactive API docs**: Visit `http://localhost:8000/docs` for Swagger UI
+- **Alternative docs**: Visit `http://localhost:8000/redoc` for ReDoc interface
+- **Background processing**: Video processing runs in background tasks
+- **CORS enabled**: Frontend can communicate with the API
 
 ### Step 6: Start Frontend
 
@@ -185,19 +232,82 @@ python main.py query --question "What is the main topic?" --save-data processed_
 
 ### API Endpoints
 
+The FastAPI backend provides the following endpoints:
+
+**System Status**
 ```bash
-# Check system status
+# Check system status and configuration
 curl http://localhost:8000/status
 
-# Query the system
+# Get processed data information
+curl http://localhost:8000/data
+
+# Get API information
+curl http://localhost:8000/api
+```
+
+**Video Processing**
+```bash
+# Process YouTube videos (background task)
+curl -X POST "http://localhost:8000/process" \
+  -H "Content-Type: application/json" \
+  -d '{"urls": ["https://youtube.com/watch?v=..."], "batch_size": 1}'
+```
+
+**Querying System**
+```bash
+# Query the RAG system (creates new session)
 curl -X POST "http://localhost:8000/query" \
   -H "Content-Type: application/json" \
   -d '{"question": "What is calisthenics?", "use_rag": true}'
 
-# Process new videos
+# Follow-up query with conversation context
+curl -X POST "http://localhost:8000/follow-up-query" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Can you explain more?", "use_rag": true, "session_id": "your-session-id"}'
+```
+
+**Advanced Query Features**
+```bash
+# Generate sub-queries for better retrieval
+curl -X POST "http://localhost:8000/generate-sub-queries" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What are the benefits of calisthenics?"}'
+
+# Generate step-back query for broader context
+curl -X POST "http://localhost:8000/generate-step-back-query" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What are advanced calisthenics moves?"}'
+```
+
+**Interactive API Documentation**
+- **Swagger UI**: `http://localhost:8000/docs` - Interactive API testing
+- **ReDoc**: `http://localhost:8000/redoc` - Alternative documentation format
+
+### Testing the API
+
+**1. Check if the server is running:**
+```bash
+curl http://localhost:8000/api
+```
+
+**2. Test video processing:**
+```bash
 curl -X POST "http://localhost:8000/process" \
   -H "Content-Type: application/json" \
-  -d '{"urls": ["https://youtube.com/watch?v=..."], "batch_size": 1}'
+  -d '{"urls": ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"], "batch_size": 1}'
+```
+
+**3. Test querying (after processing videos):**
+```bash
+curl -X POST "http://localhost:8000/query" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is this video about?", "use_rag": true}'
+```
+
+**4. Check system status:**
+```bash
+curl http://localhost:8000/status
 ```
 
 ## 🔧 **Configuration**
@@ -240,14 +350,29 @@ digital_training/
 
 ## 🔍 **Features**
 
-- **🎵 Audio Processing**: Automatic YouTube audio extraction and Whisper transcription
-- **📝 Smart Summarization**: AI-powered summarization of video content
-- **🔍 Hybrid Search**: Combines semantic similarity and keyword matching
-- **💬 Chat Interface**: Modern, responsive web-based chat UI
-- **⚡ Background Processing**: Non-blocking video processing via FastAPI
+### Core Functionality
+- **🎵 Audio Processing**: Automatic YouTube audio extraction using faster-whisper
+- **📝 Smart Summarization**: AI-powered summarization of video content chunks
+- **🔍 Hybrid Search**: Combines semantic similarity and keyword matching (BGE-M3 + dense embeddings)
+- **💬 Chat Interface**: Modern, responsive web-based chat UI with session management
+- **⚡ Background Processing**: Non-blocking video processing via FastAPI background tasks
 - **📊 Source Attribution**: Shows which video segments answer your questions
-- **🔄 Incremental Processing**: Skips already processed videos
+
+### Advanced Features
+- **🔄 Incremental Processing**: Skips already processed videos to avoid duplicates
 - **🎛️ Flexible Querying**: Toggle between RAG and direct LLM responses
+- **🗨️ Conversation Context**: Follow-up queries with conversation history
+- **🎯 Query Enhancement**: Sub-query generation and step-back query techniques
+- **📈 Memory Optimization**: Chunked video processing for large files
+- **🔐 Session Management**: Persistent chat sessions with MongoDB storage
+
+### Technical Features
+- **🚀 FastAPI Backend**: RESTful API with auto-generated documentation
+- **🎨 Interactive API Docs**: Swagger UI and ReDoc for easy testing
+- **📱 CORS Support**: Cross-origin requests enabled for frontend integration
+- **🗃️ MongoDB Integration**: Persistent storage for videos and chat sessions
+- **⚡ Vector Database**: Milvus for efficient similarity search
+- **🔧 Configurable**: Flexible configuration for models and parameters
 
 ## 🚨 **Troubleshooting**
 
