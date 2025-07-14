@@ -11,7 +11,7 @@ class Config:
     MEDIA_DIR = "./media/it"
     TEMP_DIR = "./temp"
     RES_DIR = './res'
-    CHUNK_SIZE = 3200
+    CHUNK_SIZE =3200
     CHUNK_OVERLAP = 40
     BATCH_SIZE = 8
     CHUNK_LENGTH = 30

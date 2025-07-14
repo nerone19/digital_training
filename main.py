@@ -16,6 +16,14 @@ import glob
 import hashlib
 import logging
 import re
+import tempfile
+import numpy as np
+from faster_whisper import WhisperModel
+from typing import Iterator, Optional, Callable
+import librosa
+from pydub import AudioSegment
+import tempfile
+import os
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 from pytubefix import YouTube
@@ -41,48 +49,157 @@ import json
 
 from db import MongoDB, ChatSessionRepository, VideoRepository
 from classes import ChatSessionManager, ConversationContextBuilder
+from langchain_core.document_loaders import BaseBlobParser
+from langchain_core.documents import Document
+from langchain_core.document_loaders.blob_loaders import Blob
 from config import Config
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def get_formatted_file_name(doc: Document) -> str:
+    return doc.metadata.get("source").split("/")[-1]
 
-
-class CustomWhisperParser(OpenAIWhisperParserLocal):
-    """Custom Whisper parser for local speech recognition."""
-    
-    def __init__(self, batch_size: int = 8, chunk_length: int = 30):
-        """Initialize the custom Whisper parser."""
+class CustomWhisperParser:
+    def __init__(self, model_size="turbo", device="cpu"):
+        """
+        Initialize the streaming Whisper processor
+        
+        Args:
+            model_size: Whisper model size ("tiny", "base", "small", "medium", "large")
+            device: "cpu" or "cuda"
+        """
+        self.model = WhisperModel(model_size, device=device, compute_type="float32")
+        self.chunk_duration = 30  # seconds
+        self.overlap_duration = 2  # seconds for context
+        self.model_size_or_path = model_size
+        
+    def process_audio_chunk(self, audio_data, sample_rate=16000):
+        """
+        Process a single audio chunk
+        
+        Args:
+            audio_data: numpy array of audio samples
+            sample_rate: sample rate of the audio
+            
+        Returns:
+            Transcribed text
+        """
         try:
-            from transformers import pipeline
-            import torch
-        except ImportError as e:
-            raise ImportError(f"Required packages not found: {e}")
+            # Save chunk to temporary file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                # Convert to the format Whisper expects
+                audio_segment = AudioSegment(
+                    audio_data.tobytes(),
+                    frame_rate=sample_rate,
+                    sample_width=audio_data.dtype.itemsize,
+                    channels=1
+                )
+                audio_segment.export(temp_file.name, format="wav")
+                
+                # Transcribe
+                segments, info = self.model.transcribe(temp_file.name, beam_size=5)
+                text = " ".join([segment.text for segment in segments])
+                
+                # Clean up
+                os.unlink(temp_file.name)
+                
+                return text.strip()
+                
+        except Exception as e:
+            print(f"Error processing chunk: {e}")
+            return ""
+
+    def lazy_parse(self, blob: Blob) -> Iterator[Document]:
+        """
+        Lazily parse the blob and yield Document objects for each chunk
+        Args:
+            blob: The audio blob to parse
+        Yields:
+            Document objects containing transcribed text chunks
+        """
+        # Save blob to temporary file for processing
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+            temp_file.write(blob.as_bytes())
+            temp_file_path = temp_file.name
+
+        try:
+            # Load audio file
+            audio, sr = librosa.load(temp_file_path, sr=16000)
+            chunk_samples = int(self.chunk_duration * sr)
+            overlap_samples = int(self.overlap_duration * sr)
+            
+            chunk_index = 0
+            for i in range(0, len(audio), chunk_samples - overlap_samples):
+                chunk = audio[i:i + chunk_samples]
+                
+                # Skip very short chunks
+                if len(chunk) < sr:  # Less than 1 second
+                    continue
+                
+                text = self.process_audio_chunk(chunk, sr)
+                if text:
+                    # Calculate time metadata
+                    start_time = i / sr
+                    end_time = min((i + len(chunk)) / sr, len(audio) / sr)
+                    
+                    # Create document with metadata
+                    doc = Document(
+                        page_content=text,
+                        metadata={
+                            "source": blob.source if hasattr(blob, 'source') else "audio_file",
+                            "chunk_index": chunk_index,
+                            "start_time": start_time,
+                            "end_time": end_time,
+                            "duration": end_time - start_time,
+                            "model_size": self.model_size_or_path,
+                            "language": getattr(self.model, 'detected_language', 'unknown')
+                        }
+                    )
+                    yield doc
+                    chunk_index += 1
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+    
+    def process_large_file(self, file_path, callback=None):
+        """
+        Process a large audio file in chunks
         
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-        model_id = "openai/whisper-large-v3"
-        self.batch_size = batch_size
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_id, 
-            torch_dtype=torch_dtype, 
-            low_cpu_mem_usage=True, 
-            use_safetensors=True
-        )
-        model.to(self.device)
+        Args:
+            file_path: path to the audio file
+            callback: optional callback function to handle each chunk result
+            
+        Returns:
+            Complete transcription
+        """
+        # Load audio file
+        audio, sr = librosa.load(file_path, sr=16000)
         
-        processor = AutoProcessor.from_pretrained(model_id)
+        chunk_samples = int(self.chunk_duration * sr)
+        overlap_samples = int(self.overlap_duration * sr)
         
-        self.pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model,
-            tokenizer=processor.tokenizer,
-            feature_extractor=processor.feature_extractor,
-            torch_dtype=torch_dtype,
-            device=self.device,
-            chunk_length_s=chunk_length
-        )
+        full_transcription = []
+        
+        for i in range(0, len(audio), chunk_samples - overlap_samples):
+            chunk = audio[i:i + chunk_samples]
+            
+            # Skip very short chunks
+            if len(chunk) < sr:  # Less than 1 second
+                continue
+                
+            text = self.process_audio_chunk(chunk, sr)
+            
+            if text:
+                full_transcription.append(text)
+                
+                # Call callback if provided
+                if callback:
+                    callback(text, i // (chunk_samples - overlap_samples))
+                    
+                print(f"Chunk {i // (chunk_samples - overlap_samples)}: {text}")
 
 
 class CustomEmbeddingModel(Embeddings):
@@ -132,7 +249,6 @@ class CustomEmbeddingModel(Embeddings):
         """Embed a single query."""
         return self._get_embeddings([text])[0]
 
-
 class YouTubeProcessor:
     """Handles YouTube video processing and transcription."""
     
@@ -175,42 +291,52 @@ class YouTubeProcessor:
         
         return loaded_videos
     
-    def transcribe_videos(self, urls: List[str]) -> List[Any]:
+    def transcribe_videos(self, urls: List[str], callback=None) -> List[Any]:
         """Transcribe videos using Whisper."""
-        os.makedirs(self.config.TEMP_DIR, exist_ok=True)
-        
-        loader = GenericLoader(
-            YoutubeAudioLoader(urls, self.config.TEMP_DIR),
-            self.whisper_parser
-        )
-        docs = loader.load()
-        
-        # Clean up temporary files
-        for filename in os.listdir(self.config.TEMP_DIR):
-            file_path = os.path.join(self.config.TEMP_DIR, filename)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-        
-        return docs
+
+        docs = []
+        try: 
+            os.makedirs(self.config.TEMP_DIR, exist_ok=True)
+            
+            loader = GenericLoader(
+                YoutubeAudioLoader(urls, self.config.TEMP_DIR),
+                self.whisper_parser
+            )
+            
+            for doc in loader.lazy_load():
+                if callback:
+                    callback(doc)
+
+                if (doc_name := get_formatted_file_name(doc)) not in docs:
+                    docs.append(doc_name)
+
+            
+        except Exception as e:
+            logger.error(e)
+            
+        finally:
+            for filename in os.listdir(self.config.TEMP_DIR):
+                file_path = os.path.join(self.config.TEMP_DIR, filename)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+            return docs
+
     
-    def save_transcripts(self, docs: List[Any]) -> List[str]:
-        """Save transcripts to text files."""
 
+    def save_current_transcript(self, doc: Document):
         os.makedirs(self.config.RES_DIR, exist_ok=True)
+        if not doc:
+            raise(f"doc cannot be {doc}" )
+        filename = get_formatted_file_name(doc)
+        file_path = os.path.join(self.config.RES_DIR, filename)
+        print(file_path)
+        if not os.path.exists(file_path):
 
-        saved_files = []
-        
-        for doc in docs:
-            filename = doc.metadata.get("source").split("/")[-1]
-            file_path = os.path.join(self.config.RES_DIR, filename)
-            
-            with open(file_path, "w") as file:
-                file.write(doc.page_content)
-            
-            saved_files.append(filename)
-        
-        return saved_files
-
+            with open(file_path, "w") as out_file:
+                out_file.write(doc.page_content)
+        else:
+            with open(file_path, "a") as out_file:
+                out_file.write(doc.page_content)
 
 class TextProcessor:
     """Handles text processing, chunking, and summarization."""
@@ -245,6 +371,8 @@ class TextProcessor:
     
     def chunk_documents(self, docs: List[Any], urls: List[str], ids: List[str]) -> Dict[str, Dict]:
         """Split documents into chunks."""
+
+        
         file_chunks = {}
         text_splitter = TokenTextSplitter(
             chunk_size=self.config.CHUNK_SIZE, 
@@ -252,11 +380,17 @@ class TextProcessor:
         )
         
         for doc, url,id in zip(docs, urls, ids):
-            chunks = text_splitter.split_text(doc.page_content)
+            file_path = os.path.join(self.config.RES_DIR, doc)
+            with open(file_path, "r") as f:
+                content = f.read()
+
+            chunks = text_splitter.split_text(content)
             
             file_chunks[id] = {
                 "chunks": chunks,
                 "url": url,
+                "chunk_size": self.config.CHUNK_SIZE,
+                "chunk_overlap": self.config.CHUNK_OVERLAP,
                 "summaries": []
             }
         
@@ -459,7 +593,6 @@ class RAGSystem:
         
         # Initialize chat manager (business logic layer)
         self.chat_manager = ChatSessionManager(self.chat_repository)
-        
         # Ensure directories exist
         os.makedirs(config.MEDIA_DIR, exist_ok=True)
         os.makedirs(config.TEMP_DIR, exist_ok=True)
@@ -488,68 +621,56 @@ class RAGSystem:
         logger.info(f"Saved {len(file_chunks)} new entries to {save_file} (total: {len(existing_data)})")
     
     def check_already_processed(self, urls: List[str], existing_data: List[Dict[str, Dict]]) -> Tuple[List[str], List[str]]:
-        """
-        Check which URLs have already been processed by comparing hash IDs from filenames and URLs.
-        
-        Args:
-            urls: List of YouTube URLs to check
-            existing_data: Dictionary of existing processed data with hash IDs as keys
-        
-        Returns:
-            Tuple of (new_urls, skipped_urls)
-        """
         new_urls = []
         skipped_urls = []
         
-
-        # Create a set of existing URLs for faster lookup
+        # Create sets for faster lookup
         existing_urls = set()
+        existing_video_ids = set()
+        
         for data in existing_data:
-            video_key = [k for k in data.keys() if k!='_id']
-            video_id = video_key[0]
-            if len(video_key) > 1:
-                raise('document structure is changed. we only expect one key.')
-            data = data[video_id]  # The document itself contains the data
-
-            for el in data.values():
-                if 'url' in el:
-                    existing_urls.add(el['url'])
+            video_keys = [k for k in data.keys() if k != '_id']
+            
+            # Handle empty video_keys
+            if not video_keys:
+                continue
+                
+            if len(video_keys) > 1:
+                raise ValueError('Document structure changed. Expected only one key.')
+            
+            video_id = video_keys[0]
+            existing_video_ids.add(video_id)
+            
+            # Safely access the nested data
+            if video_id in data and 'url' in data[video_id]:
+                existing_urls.add(data[video_id]['url'])
         
         for url in urls:
             try:
-
-                # Second check: Generate hash from video ID/filename
                 yt = YouTube(url)
                 video_id = yt.video_id
-
-                # First check: URL already exists in data
-                if url in existing_urls:
-                    logger.info(f"Skipping already processed video (URL match): {url}")
-                    skipped_urls.append(url)
-                    continue
                 
-                
-                if video_id in existing_data:
-                    logger.info(f"Skipping already processed video (hash match): {url} (id: {video_id}...)")
+                # Check both URL and video ID
+                if url in existing_urls or video_id in existing_video_ids:
+                    logger.info(f"Skipping already processed video: {url}")
                     skipped_urls.append(url)
                 else:
-                    new_urls.append({"url":url, "id" :video_id})
+                    new_urls.append({"url": url, "id": video_id})
                     
             except Exception as e:
                 logger.error(f"Error checking {url}: {e}")
-                # If we can't check, assume it's new to be safe
-                new_urls.append(url)
+                new_urls.append(url)  # Assume new if can't check
         
-        logger.info(new_urls)
         return new_urls, skipped_urls
 
-    def process_videos(self, urls: List[str], batch_size: int = 1, save_file: str = None) -> Dict[str, Dict]:
+    def process_videos(self, urls: List[str], batch_size: int = 1) -> Dict[str, Dict]:
         """Process videos end-to-end with batching support and incremental saving."""
         logger.info(f"Processing {len(urls)} videos in batches of {batch_size}...")
         
         existing_videos = self.video_repository.list_all_videos()
         # Check which URLs are already processed
         new_urls, skipped_urls = self.check_already_processed(urls, existing_videos)
+        
         
         if skipped_urls:
             logger.info(f"Skipped {len(skipped_urls)} already processed videos")
@@ -570,21 +691,18 @@ class RAGSystem:
             logger.info(f"Processing batch {i//batch_size + 1}: {len(batch_urls)} videos")
             try:
                 # Transcribe batch
-                docs = self.youtube_processor.transcribe_videos(batch_urls)
+                docs_path = self.youtube_processor.transcribe_videos(batch_urls, self.youtube_processor.save_current_transcript)
                 
-                if not docs:
+                if not docs_path:
                     logger.warning(f"No documents processed in batch {i//batch_size + 1}")
                     continue
                 
-                # Save transcripts
-                self.youtube_processor.save_transcripts(docs)
-                
                 # Chunk documents
-                file_chunks = self.text_processor.chunk_documents(docs, batch_urls, batch_ids)
+                file_chunks = self.text_processor.chunk_documents(docs_path, batch_urls, batch_ids)
                 
                 # Generate summaries
                 self.text_processor.generate_summaries(file_chunks)
-
+                
                 self.video_repository.save_video_data(file_chunks)
                 
                 logger.info(f"Completed batch {i//batch_size + 1}")

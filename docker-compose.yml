@@ -7,6 +7,5 @@ services:
         - mongo-data:/data/db
       ports: [27017:27017]
       command: mongod --quiet --logpath /dev/null
-
 volumes:
   mongo-data:

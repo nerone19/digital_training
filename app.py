@@ -116,12 +116,12 @@ async def process_videos(
             raise HTTPException(status_code=400, detail=f"Invalid YouTube URL: {url}")
     
 
+
     # Add background task
     background_tasks.add_task(
         process_videos_background,
         request.urls,
-        request.batch_size,
-        save_file
+        request.batch_size
     )
     
     return ProcessStatusResponse(
@@ -130,13 +130,14 @@ async def process_videos(
         total_count=len(request.urls)
     )
 
-async def process_videos_background(urls: List[str], batch_size: int, save_file: str):
+async def process_videos_background(urls: List[str], batch_size: int):
     """Background task to process videos."""
     try:
         logger.info(f"Starting background processing of {len(urls)} videos")
         
+
         # Process videos
-        file_chunks = rag_system.process_videos(urls, batch_size, save_file)
+        file_chunks = rag_system.process_videos(urls, batch_size)
         
         # Setup vector store
         rag_system.setup_vector_store(file_chunks)
