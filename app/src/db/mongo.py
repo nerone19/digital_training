@@ -282,6 +282,9 @@ class VideoRepository:
     # todo: not efficient. We need to use a cursor to not keep all objects in memory.
     def list_all_videos(self) -> Dict[str, Dict]:
         return self.db.list_documents(self.collection)
+    
+    def count_videos(self) -> int:
+        return self.db.count_documents(self.collection)
 
     def load_existing_video_data(self) -> Dict[str, Dict]:
         """Load existing video data in the expected format for the RAG system."""

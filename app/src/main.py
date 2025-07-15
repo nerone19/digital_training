@@ -17,6 +17,7 @@ import os
 from typing import List, Dict, Any, Tuple
 from pytubefix import YouTube
 from pytubefix.cli import on_progress
+from pymongo import cursor
 
 from langchain_core.messages import HumanMessage, SystemMessage
 import json
@@ -45,7 +46,9 @@ class RAGSystem:
         self.youtube_processor = YouTubeProcessor(config)
         self.text_processor = TextProcessor(config)
         self.vector_store = VectorStore(config)
-        
+        self._initialized = False
+        self.last_document_count = 0
+
         # Initialize database layer
         MongoDB.configure(self.config.MONGO_URI, self.config.MONGO_DB)
         self.db = MongoDB()
@@ -58,6 +61,14 @@ class RAGSystem:
         # Ensure directories exist
         os.makedirs(config.MEDIA_DIR, exist_ok=True)
         os.makedirs(config.TEMP_DIR, exist_ok=True)
+
+    @property
+    def initialized(self):
+        return self._initialized
+    
+    @initialized.setter
+    def initialized(self, is_initialized):
+        self._initialized = is_initialized
 
     def save_batch_data(self, file_chunks: Dict[str, Dict], save_file: str):
         """Save or append batch data to JSON file."""
@@ -177,14 +188,25 @@ class RAGSystem:
 
         return self.video_repository.list_all_videos()
 
-    def setup_vector_store(self, documents: Dict[str, Dict]):
-        """Setup vector store with processed documents."""
-        logger.info("Setting up vector store...")
+    def setup_vector_store(self, documents: cursor):
+        """Setup vector store with caching."""
+        if not self.vector_store.initialized():
+            logger.info("Initializing vector store for first time...")
+            self.vector_store.create_collection()
+            self.vector_store.insert_documents(documents)
+            self.vector_store.initialized(True)
+            self.last_document_count = self.video_repository.count_videos()
+        else:
+            doc_count= self.video_repository.count_videos()
+            # Check if we have new documents
+            if doc_count > self.last_document_count:
+                logger.info("Adding new documents to existing vector store...")
+                self.vector_store.insert_documents(documents)
+                self.last_document_count = doc_count
+            else:
+                logger.info("Using existing vector store (no new documents)")
         
-        self.vector_store.create_collection()
-        self.vector_store.insert_documents(documents)
-        
-        logger.info("Vector store setup complete")
+        return self.vector_store
 
     def query(self, question: str, use_rag: bool = True, use_summary: bool = True) -> str:
         """Query the RAG system - your original method unchanged."""
@@ -199,7 +221,16 @@ class RAGSystem:
         else: 
             custom_expr='summary==False'
 
+        # todo: integrate step back and decompose prompt query
         search_results = self.vector_store.sparse_search(question, expr = custom_expr)
+        
+        # If no search results, disable RAG
+        if not search_results:
+            logger.warning("No search results found, disabling RAG")
+            messages = [HumanMessage(self.text_processor.format_reasoning_prompt(question))]
+            response = self.text_processor.summarizer.llm.invoke(messages)
+            return response.content, None
+            
         context = "\n".join([str(hit) for hit in search_results])
         system_prompt = """You are an AI assistant. You are able to find answers to questions from the contextual passage snippets provided."""
         
@@ -219,7 +250,7 @@ class RAGSystem:
         ]
         
         response = self.text_processor.summarizer.llm.invoke(messages)
-
+        logger.info('res',response)
         try:
             # Convert search results to serializable format
             search_results = [

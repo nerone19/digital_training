@@ -10,12 +10,6 @@ WORKDIR /code
 COPY /app/requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Install model dependencies and download models (cached unless scripts or model logic changes)
-# COPY /scripts/install_bge-m3.py ./install_bge-m3.py
-# RUN pip install huggingface_hub \
-#  && python -c "from faster_whisper import WhisperModel; WhisperModel('turbo')" \
-#  && python install_bge-m3.py
-
 # Stage 2: Runtime image with only what's needed
 FROM python:3.10-slim AS fastapi
 
@@ -58,8 +52,6 @@ COPY /fe/package*.json ./
 RUN npm install
 
 COPY /fe/ .
-
-RUN npm run build
 
 EXPOSE 3000
 CMD [ "npm", "run", "serve" ]
