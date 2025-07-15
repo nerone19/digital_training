@@ -3,7 +3,7 @@ yt_videos/**
 /venv*
 test/ 
 temp/ 
-res
+res/
 *pycache*
 standalone_embed.sh
 **/node_modules/** 

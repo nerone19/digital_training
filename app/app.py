@@ -13,14 +13,14 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 from typing import List, Dict, Any, Optional
-import json
-import logging
 import uvicorn
 from contextlib import asynccontextmanager
 
-# Import existing classes from main.py
-from main import Config, RAGSystem, logger, MongoDB
-from db import VideoRepository
+
+from src.db.mongo import MongoDB, VideoRepository
+from src.config import Config
+from src.main import RAGSystem, logger
+
 
 # Pydantic models for API
 class VideoProcessRequest(BaseModel):
@@ -325,4 +325,4 @@ async def generate_step_back_query(request: QueryRequest):
         raise HTTPException(status_code=500, detail=f"Step-back query generation failed: {str(e)}")
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=5000, reload=True)

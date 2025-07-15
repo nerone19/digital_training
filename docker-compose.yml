@@ -7,5 +7,31 @@ services:
         - mongo-data:/data/db
       ports: [27017:27017]
       command: mongod --quiet --logpath /dev/null
+    api: 
+      build: 
+        context: . 
+        target: fastapi
+      depends_on:
+        mongo:
+          condition: service_started
+          restart: true   
+      volumes:
+      - ~/ml_models:/models
+      networks:
+      - default 
+      environment:
+      - TRANSFORMERS_CACHE=/models/huggingface
+      - HF_HOME=/models/huggingface
+      - XDG_CACHE_HOME=/models
+      - PYTHONPATH=/code
+      ports: 
+      - 5000:5000
+    fe: 
+      build: 
+          context: .
+          target: fe
+      ports: 
+      - 3000:3000
 volumes:
   mongo-data:
+  model-cache:  # Volume to store downloaded models
