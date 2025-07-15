@@ -70,6 +70,15 @@ See the system in action:
 
 > **Note**: If the video doesn't display properly, you can download it from `media/videos/Kooha-2025-07-15-19-35-57.webm`
 
+###  Screenshots
+![1](media/png/1.png)
+![2](media/png/2.png)
+![3](media/png/3.png)
+![4](media/png/4.png)
+![5](media/png/5.png)
+![6](media/png/6.png)
+![7](media/png/7.png)
+
 ### Web Interface
 1. Open http://localhost:3000
 2. Process YouTube videos via API
