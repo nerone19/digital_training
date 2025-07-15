@@ -63,6 +63,13 @@ make up
 
 ## 📖 **Usage**
 
+### Demo Video
+See the system in action:
+
+![Demo Video](media/videos/Kooha-2025-07-15-19-35-57.webm)
+
+> **Note**: If the video doesn't display properly, you can download it from `media/videos/Kooha-2025-07-15-19-35-57.webm`
+
 ### Web Interface
 1. Open http://localhost:3000
 2. Process YouTube videos via API
